@@ -34,7 +34,8 @@ uint8_t calculate_checksum(const uint8_t *data, size_t len) {
   return sum & 0xFF;  // 取低字节
 }
 
-void YuhuiMPPT::send_query_command() {
+//查询实时数据命令0XB3
+void YuhuiMPPT::send_query_command() {  
   std::vector<uint8_t> data = {this->device_address_, 0xB3, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00};
   data[7] = calculate_checksum(data.data(), 7);
 
@@ -42,6 +43,7 @@ void YuhuiMPPT::send_query_command() {
   this->process_send_queue_();
 }
 
+//控制命令 01/02充电开关 03/04输出开关 05蜂鸣消音，066背光开关
 void YuhuiMPPT::send_control_command(uint8_t control_code) {
   std::vector<uint8_t> data = {this->device_address_, 0xC0, control_code, 0x00, 0x00, 0x00, 0x00, 0x00};
   data[7] = calculate_checksum(data.data(), 7);
@@ -49,7 +51,7 @@ void YuhuiMPPT::send_control_command(uint8_t control_code) {
   this->send_queue_.push(data);
   this->process_send_queue_();
 }
-
+  //mppt 充电参数设置
 void YuhuiMPPT::send_parameter_command(uint8_t parameter_code, uint32_t parameter_value, uint8_t data_length) {
   std::vector<uint8_t> data = {this->device_address_, 0xD0, parameter_code, 0x00, 0x00, 0x00, 0x00, 0x00};
   
@@ -70,7 +72,7 @@ void YuhuiMPPT::send_parameter_command(uint8_t parameter_code, uint32_t paramete
   this->send_queue_.push(data);
   this->process_send_queue_();
 }
-
+// 校时
 void YuhuiMPPT::send_clock_calibration_command() {
   time_t now = time(nullptr);
   struct tm *timeinfo = localtime(&now);
@@ -88,7 +90,7 @@ void YuhuiMPPT::send_clock_calibration_command() {
   this->send_queue_.push(data);
   this->process_send_queue_();
 }
-
+//发送处理
 void YuhuiMPPT::process_send_queue_() {
   if (this->awaiting_response_ || this->send_queue_.empty()) {
     return;
@@ -103,6 +105,7 @@ void YuhuiMPPT::process_send_queue_() {
   ESP_LOGD(TAG, "Sent command: %s", format_hex_pretty(&data.front(), data.size()).c_str());
 }
 
+//接收数据处理
 void YuhuiMPPT::on_modbus_raw_data(const std::vector<uint8_t> &data) {
   this->awaiting_response_ = false;
   this->process_send_queue_();
@@ -111,7 +114,7 @@ void YuhuiMPPT::on_modbus_raw_data(const std::vector<uint8_t> &data) {
     //ESP_LOGW(TAG, "Received data size is too small, expected at least 37 bytes, got %d", data.size());
     return;
   }
-
+//0XB1 状态查询 返回数据解析
   uint8_t address = data[0];
   uint8_t command = data[1];
   uint8_t control_code = data[2];
@@ -121,9 +124,10 @@ void YuhuiMPPT::on_modbus_raw_data(const std::vector<uint8_t> &data) {
   uint16_t pv_voltage = (data[6] << 8) | data[7];
   uint16_t battery_voltage = (data[8] << 8) | data[9];
   uint16_t charging_current = (data[10] << 8) | data[11];
-  uint16_t internal_temperature = (data[12] << 8) | data[13];
-  uint32_t daily_energy = (data[20] << 24) | (data[21] << 16) | (data[22] << 8) | data[23];
-  uint32_t total_energy = (data[24] << 24) | (data[25] << 16) | (data[26] << 8) | data[27];
+  uint16_t internal_temperature = (data[12] << 8) | data[13]; //14 15 原为内部温度2 已取消 现为空
+  uint16_t external_temperature = (data[16] << 8) | data[17];  //18 备用 恒为0 19 备用
+  uint32_t daily_energy = (data[20] << 24) | (data[21] << 16) | (data[22] << 8) | data[23];  //4byte
+  uint32_t total_energy = (data[24] << 24) | (data[25] << 16) | (data[26] << 8) | data[27];  //4byte
   uint8_t checksum = data[36];
 
   // 计算校验和
@@ -140,12 +144,13 @@ void YuhuiMPPT::on_modbus_raw_data(const std::vector<uint8_t> &data) {
     return;
   }
 
-  // 忽略控制命令的返回数据
+  // 忽略控制命令的返回数据   C0 控制命令 01/02充电开关 03/04输出开关 05蜂鸣消音，066背光开关
   if (command == 0xC0) {
     ESP_LOGD(TAG, "Received control command response, ignoring");
     return;
   }
 
+//B3实时数据查询
   if (command == 0xB3 && control_code == 0x01) {
     ESP_LOGD(TAG, "Received command 0xB3: Query real-time data");
 
@@ -298,6 +303,15 @@ void YuhuiMPPT::on_modbus_raw_data(const std::vector<uint8_t> &data) {
     // 更新内部温度传感器
     if (this->internal_temperature_sensor_ != nullptr)
       this->internal_temperature_sensor_->publish_state(internal_temperature_value);
+
+    // 解析外部温度
+    float external_temperature_value = external_temperature / 10.0;
+    ESP_LOGD(TAG, "External temperature: %.1f °C", external_temperature_value);
+
+    // 更新外部温度传感器
+    if (this->external_temperature_sensor_ != nullptr)
+      this->external_temperature_sensor_->publish_state(external_temperature_value);
+
 
     // 解析日发电量
     float daily_energy_value = daily_energy / 1000.0;
